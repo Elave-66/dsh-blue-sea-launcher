@@ -1,12 +1,14 @@
-# ============================================================================
+﻿# ============================================================================
 # 蓝海之约 launcher (dsh-blue-sea-launcher)
 # ----------------------------------------------------------------------------
-# 打开 DeepSeek Harness Web。相比 v0.1.0 的修复:
-#   1. 启动服务器时传 --no-open —— dsh web 默认会自己打开浏览器(openBrowser),
-#      与启动器的打开动作叠加就是"开了两次"。现在只由本启动器打开一次。
-#   2. 不再固定等待 4 秒,而是轮询直到端口真正就绪(最多 30 秒)再打开。
-#   3. 单实例互斥锁: 双击/重复点击时,后到的实例直接退出,不会重复启动或重复打开。
-#   4. 检活同时探测 127.0.0.1 与 ::1。
+# 打开 DeepSeek Harness Web。v0.1.2 适配新版本 dsh web 的 token 登录:
+#   新版本 dsh web 启动时打印「dsh web: <带 ?t=token 的 URL>」,浏览器必须先
+#   访问该 URL 换取签名 Cookie 之后才能进入主页面。裸地址直接访问会收到 401。
+#   因此本版本:
+#     - 启动服务器时把输出重定向到 <DSH_HOME>/dsh-web-url.log(实际上被 DSH_HOME 下)
+#     - 轮询日志中的 token URL 后,用该 URL 打开浏览器(保证登录成功)
+#     - 服务已在运行时:若日志里有本次进程的 token URL 则用其打开,否则打开裸地址
+#     - 其余保持 v0.1.1: --no-open、端口就绪轮询、单实例互斥、127.0.0.1/::1 检活
 #
 # 用法: launch.ps1 [-DryRun] [url] [port]
 #   -DryRun     只打印将要执行的动作,不真正启动服务器/浏览器(内部测试用)
@@ -19,6 +21,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
+
+$dshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }
+$urlLog = Join-Path $dshHome 'dsh-web-url.log'
 
 function Test-PortOpen([string]$hostOrIp, [int]$p) {
   try {
@@ -35,6 +40,19 @@ function Test-PortOpen([string]$hostOrIp, [int]$p) {
 
 function Test-ServerUp([int]$p) {
   return (Test-PortOpen '127.0.0.1' $p) -or (Test-PortOpen '::1' $p)
+}
+
+function Read-TokenUrl {
+  # 从日志中提取最新的「dsh web: <url>」行;只在日志最后写入时间足够新时返回
+  if (-not (Test-Path $urlLog)) { return $null }
+  try {
+    foreach ($line in @(Get-Content $urlLog -ErrorAction Stop)) {
+      if ($line -match 'dsh web:\s*(https?://\S+)') { $match = $matches[1] }
+    }
+    $t = (Get-Item $urlLog).LastWriteTime
+    if ($match -and ((Get-Date) - $t).TotalMinutes -lt 30) { return $match }
+  } catch { }
+  return $null
 }
 
 # ---- single-instance guard: another launcher already working -> exit quietly ----
@@ -55,19 +73,29 @@ try {
 
 try {
   if (Test-ServerUp $Port) {
-    Write-Output ('dsh web is already running at ' + $Url + ' — opening browser')
-    if (-not $DryRun) { Start-Process $Url }
+    $tokenUrl = Read-TokenUrl
+    if ($tokenUrl) {
+      Write-Output ('dsh web is already running — opening tokenized URL ' + $tokenUrl)
+      if (-not $DryRun) { Start-Process $tokenUrl }
+    } else {
+      Write-Output ('dsh web is already running at ' + $Url + ' — opening browser')
+      if (-not $DryRun) { Start-Process $Url }
+    }
     exit 0
   }
 
   Write-Output ('dsh web is not running — starting server (--no-open)...')
   if (-not $DryRun) {
+    # 覆盖旧日志,避免读到上一进程的失效 token
+    if (Test-Path $urlLog) { Remove-Item $urlLog -Force }
     $npx = Join-Path $env:SystemDrive 'node\npx.cmd'
     if (-not (Test-Path $npx)) { $npx = 'npx.cmd' }
-    Start-Process -FilePath $npx -ArgumentList '--verbose', '@deepseek-ai/dsh', 'web', '--no-open' -WindowStyle Minimized
+    $errLog = $urlLog + '.err'
+    Start-Process -FilePath $npx -ArgumentList '--verbose', '@deepseek-ai/dsh', 'web', '--no-open' `
+      -RedirectStandardOutput $urlLog -RedirectStandardError $errLog -WindowStyle Minimized
   } else {
     Write-Output 'dry-run: would run: npx --verbose @deepseek-ai/dsh web --no-open'
-    Write-Output ('dry-run: would wait for port ' + $Port + ' then open ' + $Url)
+    Write-Output ('dry-run: would wait for port ' + $Port + ' then open token URL from ' + $urlLog)
     exit 0
   }
 
@@ -75,10 +103,23 @@ try {
   while ((Get-Date) -lt $deadline) {
     Start-Sleep -Milliseconds 500
     if (Test-ServerUp $Port) {
-      Write-Output ('server is up at ' + $Url + ' — opening browser')
-      Start-Process $Url
+      $tokenUrl = Read-TokenUrl
+      if ($tokenUrl) {
+        Write-Output ('server is up — opening tokenized URL ' + $tokenUrl)
+        if (-not $DryRun) { Start-Process $tokenUrl }
+      } else {
+        Write-Output ('server is up at ' + $Url + ' (no token URL yet) — opening browser')
+        if (-not $DryRun) { Start-Process $Url }
+      }
       exit 0
     }
+  }
+  # 端口就绪但没等到 token URL?再给 5 秒
+  $tokenUrl = Read-TokenUrl
+  if ($tokenUrl) {
+    Write-Output ('token URL arrived late — opening ' + $tokenUrl)
+    if (-not $DryRun) { Start-Process $tokenUrl }
+    exit 0
   }
 
   Write-Output 'server did not become ready in 30s — start it manually: npx --verbose @deepseek-ai/dsh web'

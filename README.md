@@ -56,6 +56,9 @@ dsh plugin --profile web remove dsh-blue-sea-launcher
 
 ## 常见问题
 
+- **打开提示 401 未经授权**：新版 dsh web 需要带 token 的地址登录。v0.1.2 起启动器会在
+  启动服务时把输出重定向到日志并解析 token 地址打开；若服务是你在终端手动启动的，
+  快捷方式读不到该日志——用启动器启动或手动访问终端打印的带 token 地址。
 - **点一次开了两个页面**：v0.1.1 已修复——启动服务器时给 dsh web 传 `--no-open`，
   只由启动器打开一次。注意：若你自己在终端运行 `npx --verbose @deepseek-ai/dsh web`
   （不带 `--no-open`），DSH 会按原生行为自动开一次浏览器。

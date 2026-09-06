@@ -70,6 +70,11 @@ dsh plugin --profile web remove dsh-blue-sea-launcher
 
 ## 变更记录
 
+- **v0.1.2**（适配新版 dsh web 登录）：新版 `dsh web` 启动时打印**带 token 的地址**
+  （`http://127.0.0.1:3080/?t=…`），浏览器须先访问它换取签名 Cookie 才能进入页面，
+  裸地址会收到 401。启动器现在会把服务输出重定向到日志
+  （`<DSH_HOME>/dsh-web-url.log`），解析出 token 地址并用它打开浏览器；服务已运行时
+  若日志里存有本进程的 token 地址也会优先使用。旧版 dsh（无 token）依旧兼容（打开裸地址）。
 - **v0.1.1**（修复"打开两次"）：dsh web 启动时默认会自己打开浏览器（`openBrowser`）。
   启动器现在启动服务器时附带 `--no-open`，只由启动器打开一次浏览器；并改为轮询端口就绪
   （最多 30 秒）后打开，而非固定等待 4 秒；新增单实例互斥锁，双击/重复点击不会再
@@ -80,9 +85,11 @@ dsh plugin --profile web remove dsh-blue-sea-launcher
 - **点一次开了两个页面**：已修复（见上方变更记录）。注意：如果**你自己**在终端里用
   `npx --verbose @deepseek-ai/dsh web` 启动（不带 `--no-open`），dsh web 会按原生
   行为自动打开一次浏览器，这是 DSH 本身的行为，不是快捷方式的。
+- **打开提示 401 未经授权**：确认用的是 v0.1.2 启动器（新版本会自动使用带 token 的地址）。
+  若服务是**手动**在终端启动的（终端没被启动器接管输出），快捷方式读不到 token 日志——
+  改用启动器启动服务，或手动访问一次终端打印的带 token 地址。
 - **快捷方式没出现**：确认 `dsh --profile web --dump-config | Select-String blue-sea` 能看到
   `dsh-blue-sea-launcher`；重启 `dsh web` 后看控制台 `blue-sea-launcher` 日志。
 - **图标没变化**：资源管理器图标缓存延迟——桌面按 F5；仍旧就重启 `explorer.exe` 或注销一次。
-- **点击后打不开**：确认 npx 可用（`D:\node\npx.cmd` 存在，或 PATH 里有 npx）；
-  若改了端口，`launch.cmd` 按 `127.0.0.1:port` 检活。
+- **点击后打不开**：确认 npx 可用；若改了端口，`launch.cmd` 按 `127.0.0.1:port` 检活。
 - **换图标**：替换 `assets/whale-icon.ico`（多尺寸 ico），或改配置让其指向你的 ico 文件后重启。
