@@ -99,30 +99,27 @@ try {
     exit 0
   }
 
-  $deadline = (Get-Date).AddSeconds(30)
+  # 真正的"就绪信号"是日志里的 token 地址行(端口打开≠认证服务就绪)。
+  # 只在 token 地址出现后打开浏览器,否则第一次访问会撞上未就绪的认证层 → 英文错误页。
+  $deadline = (Get-Date).AddSeconds(45)
   while ((Get-Date) -lt $deadline) {
-    Start-Sleep -Milliseconds 500
-    if (Test-ServerUp $Port) {
-      $tokenUrl = Read-TokenUrl
-      if ($tokenUrl) {
-        Write-Output ('server is up — opening tokenized URL ' + $tokenUrl)
-        if (-not $DryRun) { Start-Process $tokenUrl }
-      } else {
-        Write-Output ('server is up at ' + $Url + ' (no token URL yet) — opening browser')
-        if (-not $DryRun) { Start-Process $Url }
-      }
+    Start-Sleep -Milliseconds 400
+    $tokenUrl = Read-TokenUrl
+    if ($tokenUrl) {
+      Start-Sleep -Milliseconds 600   # 认证服务与静态资源完全就绪的缓冲
+      Write-Output ('token URL ready — opening ' + $tokenUrl)
+      if (-not $DryRun) { Start-Process $tokenUrl }
       exit 0
     }
   }
-  # 端口就绪但没等到 token URL?再给 5 秒
-  $tokenUrl = Read-TokenUrl
-  if ($tokenUrl) {
-    Write-Output ('token URL arrived late — opening ' + $tokenUrl)
-    if (-not $DryRun) { Start-Process $tokenUrl }
+  # 兜底: 端口通了但 45 秒内没等到 token 行(服务启动异常/日志被别处占用)
+  if (Test-ServerUp $Port) {
+    Write-Output ('server is up but no token URL found — opening ' + $Url)
+    if (-not $DryRun) { Start-Process $Url }
     exit 0
   }
 
-  Write-Output 'server did not become ready in 30s — start it manually: npx --verbose @deepseek-ai/dsh web'
+  Write-Output 'server did not become ready in 45s — start it manually: npx --verbose @deepseek-ai/dsh web'
   exit 1
 } finally {
   if ($mutex) {
