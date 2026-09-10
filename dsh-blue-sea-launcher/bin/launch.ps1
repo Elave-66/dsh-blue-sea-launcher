@@ -1,17 +1,15 @@
 ﻿# ============================================================================
 # 蓝海之约 launcher (dsh-blue-sea-launcher)
 # ----------------------------------------------------------------------------
-# 打开 DeepSeek Harness Web。v0.1.2 适配新版本 dsh web 的 token 登录:
-#   新版本 dsh web 启动时打印「dsh web: <带 ?t=token 的 URL>」,浏览器必须先
-#   访问该 URL 换取签名 Cookie 之后才能进入主页面。裸地址直接访问会收到 401。
-#   因此本版本:
-#     - 启动服务器时把输出重定向到 <DSH_HOME>/dsh-web-url.log(实际上被 DSH_HOME 下)
-#     - 轮询日志中的 token URL 后,用该 URL 打开浏览器(保证登录成功)
-#     - 服务已在运行时:若日志里有本次进程的 token URL 则用其打开,否则打开裸地址
-#     - 其余保持 v0.1.1: --no-open、端口就绪轮询、单实例互斥、127.0.0.1/::1 检活
+# 打开 DeepSeek Harness Web。v0.1.4 —— 自适应 dsh 版本变化:
+#   1. 宽匹配启动地址: 不再依赖固定日志格式,从服务输出里抓取「最后一个 http 地址」,
+#      优先带 token/?t= 参数的地址(新版 dsh),没有也能用裸地址(旧版 dsh)。
+#   2. 打开前先访问验证: 只有地址真正可进入(200/302)才交给浏览器;收到 401/错误
+#      就继续等待并重试 —— 因此 dsh 改版导致登录方式变化时不会"第一次打开失败"。
+#   3. 任何一步失败都退化为"打开裸地址",并在控制台给出提示,不静默失效。
+#   其余保持: --no-open、单实例互斥、端口检活、日志重定向到 <DSH_HOME>/dsh-web-url.log
 #
 # 用法: launch.ps1 [-DryRun] [url] [port]
-#   -DryRun     只打印将要执行的动作,不真正启动服务器/浏览器(内部测试用)
 # ============================================================================
 param(
   [string]$Url = 'http://127.0.0.1:3080',
@@ -42,20 +40,35 @@ function Test-ServerUp([int]$p) {
   return (Test-PortOpen '127.0.0.1' $p) -or (Test-PortOpen '::1' $p)
 }
 
-function Read-TokenUrl {
-  # 从日志中提取最新的「dsh web: <url>」行;只在日志最后写入时间足够新时返回
+function Read-ServerUrl {
+  # 宽匹配: 抓服务输出里的所有 http 地址,优先带 token/?t= 的(新版 dsh),否则取最后一个
   if (-not (Test-Path $urlLog)) { return $null }
   try {
-    foreach ($line in @(Get-Content $urlLog -ErrorAction Stop)) {
-      if ($line -match 'dsh web:\s*(https?://\S+)') { $match = $matches[1] }
-    }
+    $text = Get-Content $urlLog -Raw -ErrorAction Stop
+    $all = [regex]::Matches($text, 'https?://[^\s"'']+') | ForEach-Object { $_.Value.TrimEnd('.', ',', ')', '）') }
+    if ($all.Count -eq 0) { return $null }
+    $token = $all | Where-Object { $_ -match '[?&](token|t)=' } | Select-Object -Last 1
+    $picked = if ($token) { $token } else { $all[$all.Count - 1] }
     $t = (Get-Item $urlLog).LastWriteTime
-    if ($match -and ((Get-Date) - $t).TotalMinutes -lt 30) { return $match }
+    if (((Get-Date) - $t).TotalMinutes -lt 30) { return $picked }
   } catch { }
   return $null
 }
 
-# ---- single-instance guard: another launcher already working -> exit quietly ----
+function Test-UrlReady([string]$u) {
+  # 只有真正能进入(200/302/303)才算就绪;401(需要登录)视为未就绪
+  try {
+    $resp = Invoke-WebRequest -Uri $u -UseBasicParsing -MaximumRedirection 0 -TimeoutSec 6 -ErrorAction Stop
+    return ($resp.StatusCode -ge 200 -and $resp.StatusCode -lt 400)
+  } catch {
+    $code = $null
+    try { $code = [int]$_.Exception.Response.StatusCode } catch { }
+    if ($code -ge 200 -and $code -lt 400) { return $true }
+    return $false
+  }
+}
+
+# ---- single-instance guard ----
 $mutex = $null
 try {
   $mutex = New-Object System.Threading.Mutex($false, 'BlueSeaLauncher_DSH')
@@ -65,28 +78,22 @@ try {
       exit 7
     }
   } catch [System.Threading.AbandonedMutexException] {
-    # previous run was killed mid-flight; the mutex is ours now — proceed
   }
 } catch {
-  $mutex = $null  # mutex unavailable (very rare) — proceed without the guard
+  $mutex = $null
 }
 
 try {
   if (Test-ServerUp $Port) {
-    $tokenUrl = Read-TokenUrl
-    if ($tokenUrl) {
-      Write-Output ('dsh web is already running — opening tokenized URL ' + $tokenUrl)
-      if (-not $DryRun) { Start-Process $tokenUrl }
-    } else {
-      Write-Output ('dsh web is already running at ' + $Url + ' — opening browser')
-      if (-not $DryRun) { Start-Process $Url }
-    }
+    $serverUrl = Read-ServerUrl
+    $target = if ($serverUrl) { $serverUrl } else { $Url }
+    Write-Output ('dsh web is already running — opening ' + $target)
+    if (-not $DryRun) { Start-Process $target }
     exit 0
   }
 
   Write-Output ('dsh web is not running — starting server (--no-open)...')
   if (-not $DryRun) {
-    # 覆盖旧日志,避免读到上一进程的失效 token
     if (Test-Path $urlLog) { Remove-Item $urlLog -Force }
     $npx = Join-Path $env:SystemDrive 'node\npx.cmd'
     if (-not (Test-Path $npx)) { $npx = 'npx.cmd' }
@@ -95,31 +102,44 @@ try {
       -RedirectStandardOutput $urlLog -RedirectStandardError $errLog -WindowStyle Minimized
   } else {
     Write-Output 'dry-run: would run: npx --verbose @deepseek-ai/dsh web --no-open'
-    Write-Output ('dry-run: would wait for port ' + $Port + ' then open token URL from ' + $urlLog)
+    Write-Output ('dry-run: would poll ' + $urlLog + ' and verify the URL before opening')
     exit 0
   }
 
-  # 真正的"就绪信号"是日志里的 token 地址行(端口打开≠认证服务就绪)。
-  # 只在 token 地址出现后打开浏览器,否则第一次访问会撞上未就绪的认证层 → 英文错误页。
-  $deadline = (Get-Date).AddSeconds(45)
+  # 轮询: 抓到地址 → 验证可进入 → 打开;dsh 改版导致地址格式变化也能自适应
+  $deadline = (Get-Date).AddSeconds(60)
+  $lastTried = $null
   while ((Get-Date) -lt $deadline) {
-    Start-Sleep -Milliseconds 400
-    $tokenUrl = Read-TokenUrl
-    if ($tokenUrl) {
-      Start-Sleep -Milliseconds 600   # 认证服务与静态资源完全就绪的缓冲
-      Write-Output ('token URL ready — opening ' + $tokenUrl)
-      if (-not $DryRun) { Start-Process $tokenUrl }
+    Start-Sleep -Milliseconds 500
+    $serverUrl = Read-ServerUrl
+    if ($serverUrl -and $serverUrl -ne $lastTried) {
+      $lastTried = $serverUrl
+      if (Test-UrlReady $serverUrl) {
+        Write-Output ('verified reachable — opening ' + $serverUrl)
+        if (-not $DryRun) { Start-Process $serverUrl }
+        exit 0
+      }
+    } elseif ($serverUrl -and (Test-UrlReady $serverUrl)) {
+      Write-Output ('verified reachable — opening ' + $serverUrl)
+      if (-not $DryRun) { Start-Process $serverUrl }
       exit 0
     }
   }
-  # 兜底: 端口通了但 45 秒内没等到 token 行(服务启动异常/日志被别处占用)
+
+  # 超时兜底: 端口通了就打开(即使未能验证),并提示
+  $serverUrl = Read-ServerUrl
+  if ($serverUrl) {
+    Write-Output ('could not verify but opening anyway: ' + $serverUrl)
+    if (-not $DryRun) { Start-Process $serverUrl }
+    exit 0
+  }
   if (Test-ServerUp $Port) {
-    Write-Output ('server is up but no token URL found — opening ' + $Url)
+    Write-Output ('server is up but no URL captured — opening ' + $Url)
     if (-not $DryRun) { Start-Process $Url }
     exit 0
   }
 
-  Write-Output 'server did not become ready in 45s — start it manually: npx --verbose @deepseek-ai/dsh web'
+  Write-Output 'server did not become ready in 60s — start it manually: npx --verbose @deepseek-ai/dsh web'
   exit 1
 } finally {
   if ($mutex) {
