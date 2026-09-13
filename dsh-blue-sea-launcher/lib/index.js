@@ -1,20 +1,22 @@
 // ============================================================================
 // dsh-blue-sea-launcher —— 宿主侧插件本体
 // ----------------------------------------------------------------------------
-// 装载时（DSH web profile 启动后）确保桌面存在「蓝海之约」快捷方式：
+// 装载时（DSH web profile 启动后）确保存在「蓝海之约」快捷方式：
 //   1. 目标   : <插件目录>/bin/launch.cmd
 //   2. 参数   : url port（来自 config，默认 http://127.0.0.1:3080 3080）
-//   3. 图标   : <插件目录>/assets/whale-icon.ico（直接取自打包内的 ico）
-// 点击快捷方式后 launch.cmd 会：
-//   - 若 127.0.0.1:port 已有 DSH web 在监听 -> 直接打开浏览器
-//   - 否则启动 `npx --verbose @deepseek-ai/dsh web` 再打开浏览器
+//   3. 图标   : <插件目录>/assets/whale-icon.ico
+//   位置优先级: 桌面 → 开始菜单 → 用户主目录（任一处成功即可，逐级兜底）
+//   结果写入 <DSH_HOME>/dsh-blue-sea-launcher-status.log，便于用户反馈排查。
 //
-// 快捷方式已存在且目标/图标一致时插件不重复写入（不刷新时间戳）。
-// 卸载插件不会删除已经创建的快捷方式（它先于 DSH 启动，是"入口"）。
+// 失败排查要点（v0.1.5 起会明确打印）：
+//   - 非 Windows 平台：没有"桌面快捷方式"概念，插件只记录状态不报错
+//   - 装完未重启 dsh web：bundle 只在启动时组合，插件不会运行（常见原因）
+//   - 或直接双击 <插件目录>/bin/create-shortcut.cmd 手动创建（无需重启）
 // ============================================================================
 
 import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { appendFileSync, existsSync } from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -22,11 +24,7 @@ import { fileURLToPath } from 'node:url'
 // whether installed as a normal npm plugin (node_modules) or a local link.
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
-// Executable name: the service name registered in the boot tree.
 const name = 'blue-sea-launcher'
-
-// No service dependencies: everything we need is node: builtins + COM via
-// powershell.exe. Empty inject list keeps the entry trivial to mount.
 const inject = []
 
 const DEFAULT_CONFIG = {
@@ -37,41 +35,61 @@ const DEFAULT_CONFIG = {
   icon: 'assets/whale-icon.ico',
 }
 
-// PowerShell script: reads all inputs from DSH_BS_* environment variables
-// (spawn env), so nothing needs quoting through the command line. Values are
-// picked up either as a shortcut mapping or via `.lnk` recreation.
+// PowerShell：输入全部通过 DSH_BS_* 环境变量传递；依次尝试 桌面 → 开始菜单 → 主目录。
+// 输出一行结果：CREATED <path> / UP_TO_DATE <path> / FALLBACK <path> / FAILED <reason>
 const SHORTCUT_PS = `
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
-$ErrorActionPreference = 'Stop'
-$name       = $env:DSH_BS_NAME
-$target     = $env:DSH_BS_TARGET
-$arguments  = $env:DSH_BS_ARGS
-$icon       = $env:DSH_BS_ICON
-$workdir    = $env:DSH_BS_WORKDIR
-$desc       = $env:DSH_BS_DESC
-$desktop    = [Environment]::GetFolderPath('Desktop')
+$ErrorActionPreference = 'Continue'
+$name      = $env:DSH_BS_NAME
+$target    = $env:DSH_BS_TARGET
+$arguments = $env:DSH_BS_ARGS
+$icon      = $env:DSH_BS_ICON
+$workdir   = $env:DSH_BS_WORKDIR
+$desc      = $env:DSH_BS_DESC
+
+$desktop = [Environment]::GetFolderPath('Desktop')
 if ([string]::IsNullOrWhiteSpace($desktop)) { $desktop = Join-Path $env:USERPROFILE 'Desktop' }
-$lnk = Join-Path $desktop ($name + '.lnk')
-$ws = New-Object -ComObject WScript.Shell
-if (Test-Path $lnk) {
-  $old = $ws.CreateShortcut($lnk)
-  if ($old.TargetPath -eq $target -and $old.Arguments -eq $arguments -and $old.IconLocation -eq ($icon + ',0')) {
-    Write-Output ('UP_TO_DATE ' + $lnk)
-    exit 0
+$programs = [Environment]::GetFolderPath('Programs')
+$homeDir = $env:USERPROFILE
+
+$dirs = @()
+foreach ($d in @($desktop, $programs, $homeDir)) { if ($d -and (Test-Path $d)) { $dirs += $d } }
+if (-not $dirs.Count) { Write-Output 'FAILED no-writable-location'; exit 3 }
+
+try { $ws = New-Object -ComObject WScript.Shell } catch { Write-Output ('FAILED com:' + $_.Exception.Message); exit 3 }
+
+$idx = 0
+foreach ($dir in $dirs) {
+  $lnk = Join-Path $dir ($name + '.lnk')
+  try {
+    if (Test-Path $lnk) {
+      $old = $ws.CreateShortcut($lnk)
+      if ($old.TargetPath -eq $target -and $old.Arguments -eq $arguments -and $old.IconLocation -eq ($icon + ',0')) {
+        Write-Output ('UP_TO_DATE ' + $lnk)
+        exit 0
+      }
+    }
+    $s = $ws.CreateShortcut($lnk)
+    $s.TargetPath = $target
+    $s.Arguments = $arguments
+    $s.WorkingDirectory = $workdir
+    $s.IconLocation = ($icon + ',0')
+    $s.Description = $desc
+    $s.WindowStyle = 1
+    $s.Save()
+    if (Test-Path $lnk) {
+      if ($idx -eq 0) { Write-Output ('CREATED ' + $lnk) } else { Write-Output ('FALLBACK ' + $lnk) }
+      exit 0
+    }
+  } catch {
+    $lastErr = $_.Exception.Message
   }
+  $idx++
 }
-$s = $ws.CreateShortcut($lnk)
-$s.TargetPath    = $target
-$s.Arguments     = $arguments
-$s.WorkingDirectory = $workdir
-$s.IconLocation  = ($icon + ',0')
-$s.Description   = $desc
-$s.WindowStyle   = 1
-$s.Save()
-Write-Output ('CREATED ' + $lnk)
+Write-Output ('FAILED ' + ($lastErr -replace '\\s+', ' '))
+exit 3
 `
 
-/** Run the shortcut PS script; resolves to its stdout (trimmed). */
 function runShortcutScript(cfg, launcherPath, iconPath) {
   return new Promise((resolve, reject) => {
     const child = spawn('powershell.exe', [
@@ -97,10 +115,22 @@ function runShortcutScript(cfg, launcherPath, iconPath) {
     child.stderr.on('data', (d) => { err += d })
     child.on('error', reject)
     child.on('close', (code) => {
-      if (code === 0) resolve(out.trim())
-      else reject(new Error(`powershell exit ${code}: ${err.trim() || out.trim()}`))
+      const line = out.trim().split('\n').pop() || ''
+      if (line.startsWith('CREATED') || line.startsWith('UP_TO_DATE') || line.startsWith('FALLBACK')) resolve(line)
+      else reject(new Error(line || err.trim() || `powershell exit ${code}`))
     })
   })
+}
+
+function writeStatus(entry) {
+  try {
+    const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh')
+    const file = path.join(home, 'dsh-blue-sea-launcher-status.log')
+    appendFileSync(file, `[${new Date().toISOString()}] ${entry}\n`, 'utf8')
+    return file
+  } catch (e) {
+    return null
+  }
 }
 
 function apply(ctx, config = {}) {
@@ -110,25 +140,33 @@ function apply(ctx, config = {}) {
   const log = ctx.logger ? ctx.logger('blue-sea-launcher') : console
 
   async function ensureShortcut() {
+    // 非 Windows：没有桌面快捷方式概念，明确记录，不视为错误
+    if (process.platform !== 'win32') {
+      const msg = `skip: platform=${process.platform} (desktop shortcut requires Windows)`
+      log.warn(msg)
+      writeStatus(msg)
+      return
+    }
     if (!existsSync(launcherPath)) {
-      log.warn(`launcher script missing: ${launcherPath} — skip shortcut creation`)
+      const msg = `launcher script missing: ${launcherPath} — run bin/create-shortcut.cmd after reinstalling`
+      log.warn(msg)
+      writeStatus(msg)
       return
     }
     if (!existsSync(iconPath)) {
-      log.warn(`icon file missing: ${iconPath} — skip shortcut creation`)
-      return
+      log.warn(`icon file missing: ${iconPath} — shortcut still created without the icon`)
     }
     try {
-      const line = await runShortcutScript(cfg, launcherPath, iconPath)
-      if (line.startsWith('UP_TO_DATE')) {
-        log.info(`shortcut up to date: ${line.slice('UP_TO_DATE '.length)}`)
-      } else {
-        log.info(`desktop shortcut created: ${line}`)
-        log.info(`target: ${launcherPath} ${cfg.url} ${cfg.port}`)
-        log.info(`icon: ${iconPath}`)
-      }
+      const line = await runShortcutScript(cfg, launcherPath, existsSync(iconPath) ? iconPath : launcherPath)
+      if (line.startsWith('UP_TO_DATE')) log.info(`shortcut up to date: ${line.slice('UP_TO_DATE '.length)}`)
+      else if (line.startsWith('FALLBACK')) log.info(`desktop unavailable — shortcut created at: ${line.slice('FALLBACK '.length)} (manual: bin/create-shortcut.cmd)`)
+      else log.info(`shortcut created: ${line.slice('CREATED '.length)}`)
+      writeStatus(`ok: ${line}`)
     } catch (err) {
-      log.error(`shortcut creation failed: ${String((err && err.message) || err)}`)
+      const msg = String((err && err.message) || err)
+      log.error(`shortcut creation failed: ${msg}`)
+      log.error(`manual fallback: double-click ${path.join(PACKAGE_ROOT, 'bin', 'create-shortcut.cmd')}`)
+      writeStatus(`failed: ${msg}`)
     }
   }
 

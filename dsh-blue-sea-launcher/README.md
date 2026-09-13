@@ -38,6 +38,19 @@ dsh plugin --profile web add link:D:\软件创意\综合聊天\dsh-blue-sea-laun
 - `dsh plugin` 会把它加入 `dsh.profile.bundles`（因为 package.json 声明了 `dsh.bundle.patch`）
 - `link:` 记录绝对路径——**之后移动了插件目录要重新 add**
 - 安装完成后需**重启 `dsh web`**（bundle 层只在启动时组合），桌面即出现「蓝海之约」
+- ⚠️ **没看到快捷方式？** 三种可能，按顺序排查：
+  1. **没有重启 `dsh web`**（最常见）——插件只在 web 启动时运行，重启后即可生成
+  2. 装到了**别的 profile**（不是 `web`）——用 `dsh --profile web --dump-config` 确认能看到本插件
+  3. **手动一键创建**：双击 `<插件目录>/bin/create-shortcut.cmd`（无需重启、无需 dsh）
+     它会依次尝试 桌面 → 开始菜单 → 用户主目录，并打印创建到的确切路径
+- 状态可在 `<DSH_HOME>/dsh-blue-sea-launcher-status.log` 查看（反馈问题时请附上它）
+
+下载安装（GitHub 发布包，无需 npm）：
+
+```powershell
+# 下载仓库 ZIP 解压后，指向解压出的插件目录
+dsh plugin --profile web add link:<解压路径>\dsh-blue-sea-launcher
+```
 
 发布到 npm 后任意机器安装：
 
@@ -70,6 +83,10 @@ dsh plugin --profile web remove dsh-blue-sea-launcher
 
 ## 变更记录
 
+- **v0.1.5**（快捷方式可靠性）：新增 **`bin/create-shortcut.cmd` 手动一键创建**（双击即可，
+  不依赖重启 dsh）；自动创建改为**桌面 → 开始菜单 → 用户主目录**三级兜底；结果写入
+  `<DSH_HOME>/dsh-blue-sea-launcher-status.log`；非 Windows 平台明确提示（不再静默失败）；
+  安装说明补充"必须先重启 dsh web"与"用 GitHub 包 link 安装"。
 - **v0.1.4**（自适应 dsh 版本更新）：不再依赖固定的启动日志格式——从服务输出里**宽匹配**
   抓取地址（优先带 token 的），并且**打开前先访问验证**（200/302 才算就绪；401/错误则继续
   等待重试，最长 60 秒）。因此 dsh 升级改变登录方式或日志样式时启动器**自动适应**，

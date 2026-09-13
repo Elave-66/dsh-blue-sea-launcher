@@ -1,7 +1,7 @@
 {
   "name": "dsh-blue-sea-launcher",
-  "version": "0.1.4",
-  "description": "DSH bundle 插件：装载后在桌面生成「蓝海之约」快捷方式，一键打开 DeepSeek Harness Web（自适应 dsh 版本变化的 token 登录与就绪检测）",
+  "version": "0.1.5",
+  "description": "DSH bundle 插件：在桌面生成「蓝海之约」快捷方式，一键打开 DeepSeek Harness Web（自适应 dsh 版本、多位置兜底、可手动创建）",
   "keywords": [
     "dsh",
     "dsh-plugin",
